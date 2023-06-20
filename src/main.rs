@@ -1,9 +1,8 @@
 use std::fmt::{Display, Formatter};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File, OpenOptions};
-use std::io::{stdout, Read, Write, self, BufRead, BufReader, ErrorKind, Stdout};
-use std::io::ErrorKind::InvalidInput;
+use std::fs::{self, OpenOptions};
+use std::io::{stdout, Write, self, BufRead, BufReader, Stdout};
 use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,9 +12,8 @@ use crossterm:: {
     terminal::{disable_raw_mode, enable_raw_mode, Clear, ClearType},
     cursor::MoveTo,
 };
-use ctrlc;
 extern crate directories;
-use directories::{BaseDirs, UserDirs, ProjectDirs};
+use directories::{ProjectDirs};
 use regex::Regex;
 
 
@@ -41,14 +39,14 @@ struct Args {
     filename: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 enum Identifier {
     Name(String),
     Company(String),
     Both(String, String),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct Customer {
     identifier: Identifier,
     phone: String,
@@ -77,15 +75,15 @@ enum InputCommand {
 fn init() -> crossterm::Result<(Arc<RawMode>, Arc<AtomicBool>)> {
     let raw_mode = Arc::new(RawMode::enable()?);
     let running = Arc::new(AtomicBool::new(true));
-    let r = raw_mode.clone();
-    let r2 = running.clone();
+    let r = running.clone();
 
     ctrlc::set_handler(move || {
-        r2.store(false, Ordering::SeqCst);
+        r.store(false, Ordering::SeqCst);
     }).expect("Error setting Ctrl-C handler");
 
     Ok((raw_mode, running))
 }
+
 fn sample_data() -> Vec<Customer> {
     vec![
         Customer {
@@ -102,24 +100,74 @@ fn sample_data() -> Vec<Customer> {
         }
     ]
 }
+
 fn query_prompt(mut stdout: &Stdout) {
     execute!(stdout, Clear(ClearType::All), MoveTo(0, 0)).expect("Could not clear screen");
     print!("Query: ");
-    execute!(stdout, MoveTo(0,2));
+    execute!(stdout, MoveTo(0,2)).expect("Could not move cursor");
+}
+fn prompt_delete_customers(customers: &mut Vec<Customer>, filtered: Vec<&Customer>) {
+    println!("Deleting Customers");
+    for filter in filtered {
+        customers.retain(|customer| customer != filter)
+    }
 }
 
+fn do_delete(mut stdout: &Stdout, customers: &mut Vec<Customer>) -> Result<(),Box<dyn std::error::Error>> {
+    execute!(stdout, Clear(ClearType::All), MoveTo(0, 0)).expect("Could not clear screen");
+    print!("Delete: ");
+    execute!(stdout, MoveTo(0,2)).expect("Could not move cursor");
+
+    let mut query = std::string::String::new();
+    let mut filtered = filter_customers(customers, &query);
+    display_customers(&filtered);
+    let pos = (8 + query.len()) as u16;
+    execute!(stdout, MoveTo(pos,0))?;
+
+    loop {
+        // endless loop to collect input
+        if poll(std::time::Duration::from_millis(500))? {
+            if let Event::Key(event) = read()? {
+                match event.code {
+                    KeyCode::Char('c') if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                        break;
+                    }
+                    KeyCode::Char(c) => {
+                        query.push(c);
+                    }
+                    KeyCode::Enter => {
+                        prompt_delete_customers(customers, filtered);
+                    }
+                    _ => {}
+                };
+
+                execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
+                print!("Delete: {}", query);
+                execute!(stdout, MoveTo(0,2))?;
+                filtered = filter_customers(customers, &query);
+                display_customers(&filtered);
+                let pos = (8 + query.len()) as u16;
+                execute!(stdout, MoveTo(pos,0))?;
+            }
+        }
+    }
+    Ok(())
+}
+fn do_add(mut stdout: &Stdout) {
+
+}
 fn main() -> crossterm::Result<()> {
-    let (raw_mode, running) = init()?;
+    let (_raw_mode, running) = init()?;
 
     while running.load(Ordering::SeqCst) {
-        let customers = sample_data();
-        let mut query = String::new();
+        let mut customers = sample_data();
+        let mut query = std::string::String::new();
         let mut filtered = filter_customers(&customers, &query);
         let mut stdout = stdout();
         query_prompt(&stdout);
-
         display_customers(&filtered);
         execute!(stdout, MoveTo(7, 0))?;
+
         loop {
             if poll(std::time::Duration::from_millis(500))? {
                 if let Event::Key(event) = read()? {
@@ -127,6 +175,14 @@ fn main() -> crossterm::Result<()> {
                         KeyCode::Char('c') if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                             running.store(false, Ordering::SeqCst);
                             break;
+                        }
+                        KeyCode::Char('a') if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                            //do add
+                            do_add(&stdout);
+                        }
+                        KeyCode::Char('d') if event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                            //do delete
+                            do_delete(&stdout, &mut customers).unwrap();
                         }
                         KeyCode::Char(c) => {
                             query.push(c);
